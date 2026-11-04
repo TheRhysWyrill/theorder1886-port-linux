@@ -48,6 +48,22 @@ class ControlMapTest(unittest.TestCase):
                 worker.assert_called_once_with(target=app.check_update, daemon=True)
                 worker.return_value.start.assert_called_once_with()
 
+    def test_every_platform_checks_updates_at_start(self):
+        # An AppImage is updated by downloading the new one, so Linux checks at start too.
+        root = mock.MagicMock()
+        root.winfo_fpixels.return_value = 96.0
+        with mock.patch.object(launcher, 'WINDOWS', False), \
+             mock.patch.object(launcher, 'load_json', return_value={'check_updates': True}), \
+             mock.patch.object(launcher, 'load_ini', return_value=(dict(launcher.INI_DEFAULTS), [])), \
+             mock.patch.multiple(launcher.Launcher, check_version_migration=mock.DEFAULT,
+                                 set_icon=mock.DEFAULT, style=mock.DEFAULT, build=mock.DEFAULT,
+                                 show=mock.DEFAULT, refresh_lists=mock.DEFAULT,
+                                 refresh_game_patches=mock.DEFAULT, gather=mock.DEFAULT), \
+             mock.patch.object(launcher.threading, 'Thread') as worker:
+            app = launcher.Launcher(root, mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock())
+        worker.assert_called_once_with(target=app.check_update, daemon=True)
+        worker.return_value.start.assert_called_once_with()
+
     def test_options_and_cross_keyboard_defaults(self):
         rows = {button: key for button, key, _pad in launcher.CONTROLS}
         self.assertEqual(rows['options'], 'Return')
@@ -634,11 +650,43 @@ class ReleaseVersionTest(unittest.TestCase):
                 payload = {'tag_name': f'windows-v{version}', 'assets': [
                     {'name': 'theorder1886-windows.zip', 'browser_download_url': 'https://example.test/release.zip'}]}
                 response = io.BytesIO(json.dumps(payload).encode())
-                with mock.patch.object(launcher.urllib.request, 'urlopen', return_value=response):
+                with mock.patch.object(launcher, 'WINDOWS', True), \
+                     mock.patch.object(launcher.urllib.request, 'urlopen', return_value=response):
                     actual, url, _ = launcher.latest_release()
                 self.assertEqual(actual, version)
                 self.assertEqual(launcher.version_tuple(actual), launcher.version_tuple(version))
                 self.assertEqual(url, 'https://example.test/release.zip')
+
+    def test_latest_release_picks_this_platforms_package(self):
+        # The Windows zip and the Linux AppImage are separate releases: each platform takes its own.
+        payload = [
+            {'tag_name': 'windows-v0.7.10', 'assets': [
+                {'name': 'theorder1886-windows.zip', 'browser_download_url': 'https://example.test/w.zip'}]},
+            {'tag_name': 'linux-v0.7.9', 'assets': [
+                {'name': 'theorder-x86_64.AppImage', 'browser_download_url': 'https://example.test/l.AppImage'}]},
+        ]
+        response = io.BytesIO(json.dumps(payload).encode())
+        with mock.patch.object(launcher, 'WINDOWS', False), \
+             mock.patch.object(launcher.urllib.request, 'urlopen', return_value=response):
+            version, url, _page = launcher.latest_release()
+        self.assertEqual((version, url), ('0.7.9', 'https://example.test/l.AppImage'))
+
+    def test_pre_releases_are_not_offered(self):
+        payload = [
+            {'tag_name': 'windows-v0.7.10-rc.1', 'prerelease': True, 'assets': [
+                {'name': 'theorder1886-windows.zip', 'browser_download_url': 'https://example.test/rc.zip'}]},
+            {'tag_name': 'windows-v0.7.9', 'assets': [
+                {'name': 'theorder1886-windows.zip', 'browser_download_url': 'https://example.test/stable.zip'}]},
+        ]
+        response = io.BytesIO(json.dumps(payload).encode())
+        with mock.patch.object(launcher, 'WINDOWS', True), \
+             mock.patch.object(launcher.urllib.request, 'urlopen', return_value=response):
+            version, url, _page = launcher.latest_release()
+        self.assertEqual((version, url), ('0.7.9', 'https://example.test/stable.zip'))
+
+    def test_release_tags_of_both_platforms_are_their_version(self):
+        self.assertEqual(launcher.release_version('linux-v0.7.9'), '0.7.9')
+        self.assertEqual(launcher.release_version('windows-v0.7.9'), '0.7.9')
 
     def test_the_order_release_version(self):
         self.assertEqual(launcher.VERSION, '0.7.9')

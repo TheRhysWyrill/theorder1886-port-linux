@@ -1979,8 +1979,8 @@ void TextureCache::GarbageCollectImages() {
             if (budget != 0) {
                 const u64 process_cap = 3072_MB;
                 trigger_gc_memory = std::min(budget / 10 * 6, process_cap);
-                pressure_gc_memory = std::min(budget / 100 * 80, process_cap + 512_MB);
-                critical_gc_memory = std::min(budget / 100 * 90, process_cap + 1024_MB);
+                pressure_gc_memory = std::min<u64>(budget / 100 * 80, process_cap + 512_MB);
+                critical_gc_memory = std::min<u64>(budget / 100 * 90, process_cap + 1024_MB);
             }
         }
     }

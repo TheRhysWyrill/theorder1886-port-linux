@@ -474,10 +474,20 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
         address=find_free(address,size,alignment);
         if (!address) return NO_MEMORY;
     }
-    if (host_map(address,size,host_prot(prot),kind==KIND_RESERVED,phys)) return NO_MEMORY;
+    if (host_map(address,size,host_prot(prot),kind==KIND_RESERVED,phys)) {
+#ifndef _WIN32
+        int error=errno;
+        fprintf(stderr,"Runtime: host map failed at %p, size=%" PRIu64 ", prot=0x%x, phys=0x%" PRIx64 ", reserved=%d: %s\n",
+                (void *)address,size,host_prot(prot),phys,kind==KIND_RESERVED,strerror(error));
+#endif
+        return NO_MEMORY;
+    }
     void *mapped=(void *)address;
     drop_range(address,address+size);
-    if (vma_insert(vma_index(address),(Vma){address,address+size,kind,prot,type,phys})) return NO_MEMORY;
+    if (vma_insert(vma_index(address),(Vma){address,address+size,kind,prot,type,phys})) {
+        fprintf(stderr,"Runtime: VMA table insert failed at %p, size=%" PRIu64 "\n",(void *)address,size);
+        return NO_MEMORY;
+    }
     if (kind==KIND_FLEXIBLE) flexible_bytes+=size;
     if (kind!=KIND_RESERVED) queue_hook(HOOK_MAP,address,size);
     *inout=mapped;
@@ -553,6 +563,8 @@ static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, in
     write_unlock();
     flush_hooks();
     if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x\n", *out, size, prot);
+    else fprintf(stderr,"Runtime: direct map failed: address=%p, size=%" PRIu64 ", prot=0x%x, flags=0x%x, phys=0x%" PRIx64 ", alignment=0x%" PRIx64 " -> 0x%x\n",
+                 out ? *out : NULL,size,prot,flags,(uint64_t)physical,alignment,(unsigned)result);
     return result;
 }
 static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int flags, int64_t physical,
@@ -738,6 +750,13 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
         case 3: result=map_flexible_locked(&e->start,e->length,(uint8_t)e->prot,flags); break;
         case 4: result=protect_locked((uintptr_t)e->start,e->length,(uint8_t)e->prot,e->type); break;
         default: result=INVALID;
+        }
+        if (result) {
+            fprintf(stderr,"Runtime: batch map failed at entry %d: op=%d, start=%p, len=%" PRIu64 ", offset=0x%" PRIx64 ", prot=0x%x, type=%d, flags=0x%x -> 0x%x\n",
+                    done,e->operation,e->start,e->length,e->offset,(unsigned)(uint8_t)e->prot,(int)e->type,flags,(unsigned)result);
+        } else if ((uintptr_t)e->start >= USER_MIN) {
+            fprintf(stderr,"Runtime: batch map entry %d: op=%d, start=%p, len=%" PRIu64 ", offset=0x%" PRIx64 ", prot=0x%x, type=%d\n",
+                    done,e->operation,e->start,e->length,e->offset,(unsigned)(uint8_t)e->prot,(int)e->type);
         }
         if (result) break;
     }

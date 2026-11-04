@@ -6,4 +6,4 @@ Exec=AppRun
 Icon=theorder
 Categories=Game;
 Terminal=false
-StartupWMClass=theorder
+StartupWMClass=port

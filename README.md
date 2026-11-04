@@ -68,6 +68,20 @@ The work log, the fixes and the open items are in [docs/PROGRESS.md](docs/PROGRE
    The result is `out/theorder-probe.exe` (also copied as `out/theorder-probe.exe`). If the build
    says it cannot replace the executable, a game process is still running.
 
+### Linux
+
+The port builds on x86-64 Linux with GCC or Clang, Vulkan and SDL3 (`shell.nix`, or
+`bash packaging/linux/ci-deps.sh` on Ubuntu 24.04). After `bash build.sh`, the AppImage is built
+with:
+
+```bash
+bash packaging/linux/ci-deps.sh     # once: Vulkan-Headers, VMA, SDL3 and PyInstaller
+PATH="$PWD/out/venv/bin:$PATH" bash packaging/linux/build.sh
+```
+
+`dist/theorder-x86_64.AppImage` carries the launcher, the port and the libraries a desktop may not
+have; `packaging/linux/README-Linux.txt` documents it.
+
 ## Playing
 
 The game folder is taken from `THEORDER_GAME_DIR`; without it, `run.py` looks for a `CUSA00035`

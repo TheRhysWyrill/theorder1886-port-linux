@@ -176,11 +176,12 @@ static ABI int32_t addcont_mount(uint32_t service,const Label *label,MountPoint 
     if (!label || !mount) return PARAMETER;
     const int i=find_addon(label);
     if (i<0) return NOT_FOUND;
-    char guest[sizeof(mount->data)];
-    snprintf(guest,sizeof(guest),"/addcont%d",i);
+    char guest[32];
+    const int len=snprintf(guest,sizeof(guest),"/addcont%d",i);
+    if (len<0 || (size_t)len>=sizeof(mount->data)) return NOT_FOUND;
     if (runtime_file_mount(guest,addons[i].host)) return NOT_FOUND;
     memset(mount->data,0,sizeof(mount->data));
-    memcpy(mount->data,guest,strlen(guest));
+    memcpy(mount->data,guest,(size_t)len+1);
     printf("Runtime: AppContent add-on %s mounted at %s\n",addons[i].label,guest);
     return 0;
 }

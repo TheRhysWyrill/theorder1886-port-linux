@@ -56,11 +56,12 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # The game and everything it starts form one process group, ended together (GameJob).
 NEW_GROUP = {} if WINDOWS else {'start_new_session': True}
 UI_FONT, MONO_FONT, SERIF_FONT = 'Segoe UI', 'Consolas', 'Georgia'
-# This build; GitHub release tags are windows-v<VERSION>.
+# This build; GitHub release tags are windows-v<VERSION> and linux-v<VERSION>.
 VERSION = '0.7.9'
 REPOSITORY_PAGE = 'https://github.com/mateussmeneses/theorder1886-port'
 KOFI_PAGE = 'https://ko-fi.com/mateusmeneses'
-RELEASES_API = 'https://api.github.com/repos/mateussmeneses/theorder1886-port/releases/latest'
+# The list, not /latest: the Windows zip and the Linux AppImage are separate releases.
+RELEASES_API = 'https://api.github.com/repos/mateussmeneses/theorder1886-port/releases?per_page=20'
 RELEASES_PAGE = 'https://github.com/mateussmeneses/theorder1886-port/releases/latest'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'theorder1886-update'
 # Never copied over an installation by an update (the package does not hold them either).
@@ -859,7 +860,7 @@ class Launcher:
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
         root.after(500, self.watch_changes)
-        if WINDOWS and self.app.get('check_updates', True):
+        if self.app.get('check_updates', True):  # every platform: a zip or an AppImage
             threading.Thread(target=self.check_update, daemon=True).start()
 
     def check_version_migration(self):
@@ -1728,15 +1729,14 @@ class Launcher:
         self.row(f, _('Launcher language', 'Язык лаунчера'), self.choice(f, 'ui_language', 'app', UI_LANGUAGES),
                  _('Applies when the launcher opens again.', 'Применится при следующем открытии лаунчера.'))
         self.check(f, 'close_on_play', 'app', _('Close the launcher when the game starts', 'Закрывать лаунчер при запуске игры'))
-        if WINDOWS:
-            self.check(f, 'check_updates', 'app', _('Check for updates when the launcher opens',
-                                                    'Проверять обновления при открытии лаунчера'))
+        self.check(f, 'check_updates', 'app', _('Check for updates when the launcher opens',
+                                                'Проверять обновления при открытии лаунчера'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10, 0))
-        if WINDOWS:
-            ttk.Button(holder, text=_('Check for updates', 'Проверить обновления'),
-                       command=lambda: threading.Thread(target=self.check_update, args=(True,), daemon=True).start()
-                       ).pack(side='left')
+        # An AppImage is updated by downloading the new one, so Linux uses the same check.
+        ttk.Button(holder, text=_('Check for updates', 'Проверить обновления'),
+                   command=lambda: threading.Thread(target=self.check_update, args=(True,), daemon=True).start()
+                   ).pack(side='left')
         ttk.Button(holder, text=_('Desktop shortcut', 'Ярлык на рабочем столе'), command=self.shortcut).pack(side='left', padx=6)
         ttk.Button(holder, text=_('Add to Steam'), command=self.add_to_steam).pack(side='left')
         ttk.Label(holder, text=f'v{VERSION}', style='Muted.TLabel').pack(side='left', padx=10)
@@ -2319,7 +2319,7 @@ class Launcher:
         self.update_label.pack(anchor='w', padx=10, pady=(8, 6))
         buttons = tk.Frame(box, bg=CARD)
         buttons.pack(fill='x', padx=10, pady=(0, 10))
-        self.update_button = ttk.Button(buttons, text=_('Update', 'Обновить'),
+        self.update_button = ttk.Button(buttons, text=_('Update', 'Обновить') if WINDOWS else _('Release page'),
                                         command=lambda: self.install_update(version, url, page))
         self.update_button.pack(fill='x')
         ttk.Button(buttons, text=_("What's new", 'Что нового'), command=lambda: open_url(page)).pack(
@@ -2334,7 +2334,8 @@ class Launcher:
         if self.process:
             self.messagebox.showinfo(APP_NAME, _('Close the game before updating.', 'Закройте игру перед обновлением.'))
             return
-        if not FROZEN or not url:  # a source tree updates with git
+        if not FROZEN or not url or not WINDOWS:
+            # A source tree updates with git, and an AppImage is replaced by downloading the new one.
             open_url(page)
             return
         if not self.messagebox.askyesno(APP_NAME, _(
@@ -2670,16 +2671,34 @@ def version_tuple(text):
     return (int(major), int(minor), int(patch), int(candidate is None), int(candidate or 0))
 
 
+def release_version(tag):
+    """Version of a release tag: windows-v0.7.9 and linux-v0.7.9 are both 0.7.9."""
+    return re.sub(r'^(?:windows|linux)-v', '', tag or '')
+
+
 def latest_release():
-    """(version, zip URL, page URL) of the newest GitHub release."""
+    """(version, package URL, page URL) of the newest GitHub release for this platform: the
+    Windows zip or the Linux AppImage. The platforms have separate tags, so the newest stable
+    release with a matching file is used; one without it is skipped and only its page offered,
+    and a pre-release (a test build) is never offered."""
     request = urllib.request.Request(RELEASES_API, headers={'Accept': 'application/vnd.github+json',
                                                             'User-Agent': 'theorder1886-launcher'})
     with urllib.request.urlopen(request, timeout=15) as response:
-        release = json.load(response)
-    version = release['tag_name'].removeprefix('windows-v')
-    url = next((asset['browser_download_url'] for asset in release.get('assets', [])
-                if asset.get('name', '').lower().endswith('.zip')), None)
-    return version, url, release.get('html_url') or RELEASES_PAGE
+        releases = json.load(response)
+    # /releases is a list; an answer stored from /releases/latest is one release.
+    releases = [releases] if isinstance(releases, dict) else releases
+    suffix = '.zip' if WINDOWS else '.AppImage'
+    stable = [release for release in releases if isinstance(release, dict)
+              and not release.get('draft') and not release.get('prerelease')]
+    for release in stable:
+        url = next((asset['browser_download_url'] for asset in release.get('assets', [])
+                    if asset.get('name', '').lower().endswith(suffix.lower())), None)
+        if url:
+            return release_version(release['tag_name']), url, release.get('html_url') or RELEASES_PAGE
+    if stable:  # no package for this platform yet: the release page, not an installation
+        release = stable[0]
+        return release_version(release['tag_name']), None, release.get('html_url') or RELEASES_PAGE
+    raise ValueError('No releases found')
 
 
 def install_update(target, wait_pid):

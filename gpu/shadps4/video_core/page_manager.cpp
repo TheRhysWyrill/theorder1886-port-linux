@@ -38,6 +38,7 @@
 #include <poll.h>
 #include <unordered_set>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <mutex>
@@ -49,6 +50,45 @@
 #endif
 
 namespace VideoCore {
+
+#ifdef __linux__
+extern "C" int runtime_memory_is_mapped(VAddr address, u64 size);
+
+// A CPU fault on memory the runtime still has mapped, but which is absent from the GPU's
+// mapped_ranges, is not a GPU readback: there is no GPU copy to resolve. Restore the guest's
+// own protection once. A second fault at the same address (guest read-only page, or a runtime
+// VMA whose host mapping is gone) stays fatal. This also covers a GPU tracker that write-
+// protected a page after its range was removed.
+static bool RecoverUntrackedGuestFault(VAddr addr, bool write) {
+    if (!runtime_memory_is_mapped(addr, 1)) {
+        std::fprintf(stderr, "GPU: %s fault at %#llx is outside guest memory\n",
+                     write ? "write" : "read", static_cast<unsigned long long>(addr));
+        return false;
+    }
+
+    static thread_local VAddr last_addr = 0;
+    static thread_local unsigned attempts = 0;
+    if (last_addr != addr) {
+        last_addr = addr;
+        attempts = 0;
+    }
+    if (attempts++) {
+        std::fprintf(stderr,
+                     "GPU: %s fault at %#llx repeated after restoring guest protection\n",
+                     write ? "write" : "read", static_cast<unsigned long long>(addr));
+        return false;
+    }
+
+    // AddressSpace::Protect reaches mprotect, whose address must be page aligned.
+    const VAddr page = PageManager::GetPageAddr(addr);
+    Core::Memory::Instance()->GetAddressSpace().Protect(
+        page, PageManager::GetPageSize(), Core::MemoryPermission::ReadWrite);
+    std::fprintf(stderr,
+                 "GPU: %s fault at %#llx had no GPU mapping; restored guest protection\n",
+                 write ? "write" : "read", static_cast<unsigned long long>(addr));
+    return true;
+}
+#endif
 
 /// port: the instruction of the write fault being handled on this thread (buffer_cache.cpp's
 /// download statistics).
@@ -102,12 +142,13 @@ struct PageManager::Impl {
         if (is_gpu_thread) {
             PortStats::gpu_signal_faults.fetch_add(1, std::memory_order_relaxed);
         }
-        if (Common::IsWriteError(context)) {
+        const bool write = Common::IsWriteError(context);
+        bool handled;
+        if (write) {
             PortStats::Timer timer{PortStats::t_write_faults};
             port_fault_rip = Common::GetRip(context);
-            const bool handled = rasterizer->OnWriteFault(addr, is_gpu_thread);
+            handled = rasterizer->OnWriteFault(addr, is_gpu_thread);
             port_fault_rip = nullptr;
-            return handled;
         } else {
             PortStats::read_faults.fetch_add(1, std::memory_order_relaxed);
             PortStats::Timer timer{PortStats::t_read_faults};
@@ -121,9 +162,14 @@ struct PageManager::Impl {
                                 static_cast<unsigned long long>(addr));
                 }
             }
-            return rasterizer->ReadMemory(addr, size, is_gpu_thread);
+            handled = rasterizer->ReadMemory(addr, size, is_gpu_thread);
         }
-        return false;
+#ifdef __linux__
+        if (!handled && !is_gpu_thread) {
+            return RecoverUntrackedGuestFault(addr, write);
+        }
+#endif
+        return handled;
     }
 
     void EnsurePages(VAddr begin, VAddr end) {

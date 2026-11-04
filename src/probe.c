@@ -434,8 +434,10 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* The process is terminating: dladdr/snprintf are acceptable here. */
     ucontext_t *uc = context;
-    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
-    char line[512];
+    greg_t *g = uc->uc_mcontext.gregs;
+    uintptr_t rip = (uintptr_t)g[REG_RIP];
+    int fault_write = (g[REG_ERR] & 2) != 0;
+    char line[1024];
     Dl_info where;
     int site = isa_table ? isa_rewrite_site_of_stub(isa_table, rip) : -1;
     char emulating[64] = "";
@@ -451,6 +453,44 @@ static void fault(int sig, siginfo_t *info, void *context) {
     else
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    snprintf(line, sizeof(line),
+             "  access=%s err=0x%llx rip=0x%llx rsp=0x%llx rbp=0x%llx rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx rsi=0x%llx rdi=0x%llx\n",
+             fault_write ? "write" : "read", (unsigned long long)g[REG_ERR],
+             (unsigned long long)g[REG_RIP], (unsigned long long)g[REG_RSP],
+             (unsigned long long)g[REG_RBP], (unsigned long long)g[REG_RAX],
+             (unsigned long long)g[REG_RBX], (unsigned long long)g[REG_RCX],
+             (unsigned long long)g[REG_RDX], (unsigned long long)g[REG_RSI],
+             (unsigned long long)g[REG_RDI]);
+    { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    uintptr_t region_start=0, region_end=0;
+    int region_mapped=0;
+    int region_found=runtime_memory_region((uintptr_t)info->si_addr,&region_start,&region_end,&region_mapped);
+    snprintf(line, sizeof(line), "  guest region found=%d start=0x%llx end=0x%llx mapped=%d\n",
+             region_found, (unsigned long long)region_start, (unsigned long long)region_end,
+             region_mapped);
+    { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    uint64_t code[2];
+    struct iovec code_local={code,sizeof(code)}, code_remote={(void *)rip,sizeof(code)};
+    ssize_t code_bytes=process_vm_readv(getpid(),&code_local,1,&code_remote,1,0);
+    if (code_bytes > 0) {
+        char bytes[64]=""; int at=0;
+        for (ssize_t i=0; i<code_bytes && at<(int)sizeof(bytes)-3; ++i)
+            at+=snprintf(bytes+at,sizeof(bytes)-at,"%02x",((const unsigned char *)code)[i]);
+        snprintf(line,sizeof(line),"  code at rip: %s\n",bytes);
+        { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    }
+    uintptr_t rbp=(uintptr_t)g[REG_RBP];
+    for (int frame_index=0; frame_index<16; ++frame_index) {
+        uintptr_t frame[2];
+        struct iovec frame_local={frame,sizeof(frame)}, frame_remote={(void *)rbp,sizeof(frame)};
+        if (!rbp || process_vm_readv(getpid(),&frame_local,1,&frame_remote,1,0)!=(ssize_t)sizeof(frame)) break;
+        if (frame[0]<=rbp) break;
+        snprintf(line,sizeof(line),"  guest frame #%d rbp=0x%llx ret=0x%llx image-relative=0x%llx\n",
+                 frame_index, (unsigned long long)rbp, (unsigned long long)frame[1],
+                 (unsigned long long)(frame[1]-(uintptr_t)image));
+        { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+        rbp=frame[0];
+    }
     if (gpu_enabled) theordergpu_dump_guest_writes(context);
     /* Host call chain (frames with unwind info; guest frames end it). */
     void *frames[32];
